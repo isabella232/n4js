@@ -20,6 +20,7 @@ import org.eclipse.n4js.internal.lsp.N4JSSourceFolderSnapshot;
 import org.eclipse.n4js.internal.lsp.N4JSSourceFolderSnapshotForPackageJson;
 import org.eclipse.n4js.internal.lsp.N4JSWorkspaceConfigSnapshot;
 import org.eclipse.n4js.projectModel.IN4JSProject;
+import org.eclipse.n4js.projectModel.lsp.IN4JSSourceFolder;
 import org.eclipse.n4js.xtext.workspace.BuildOrderInfo;
 import org.eclipse.n4js.xtext.workspace.ConfigSnapshotFactory;
 import org.eclipse.n4js.xtext.workspace.ProjectConfigSnapshot;
@@ -81,6 +82,8 @@ public class N4JSConfigSnapshotFactory extends ConfigSnapshotFactory {
 		if (sourceFolder instanceof SourceContainerForPackageJson) {
 			return new N4JSSourceFolderSnapshotForPackageJson((SourceContainerForPackageJson) sourceFolder);
 		}
-		return new N4JSSourceFolderSnapshot(sourceFolder.getName(), sourceFolder.getPath());
+		IN4JSSourceFolder sourceFolderCasted = (IN4JSSourceFolder) sourceFolder;
+		return new N4JSSourceFolderSnapshot(sourceFolder.getName(), sourceFolder.getPath(),
+				sourceFolderCasted.getType(), sourceFolderCasted.getRelativePath());
 	}
 }

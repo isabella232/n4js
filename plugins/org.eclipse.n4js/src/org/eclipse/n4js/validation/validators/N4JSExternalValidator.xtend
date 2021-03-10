@@ -35,7 +35,7 @@ import org.eclipse.n4js.n4JS.N4TypeDeclaration
 import org.eclipse.n4js.n4JS.Script
 import org.eclipse.n4js.n4JS.VariableStatement
 import org.eclipse.n4js.projectDescription.ProjectType
-import org.eclipse.n4js.projectModel.IN4JSCore
+import org.eclipse.n4js.projectModel.IN4JSCoreNEW
 import org.eclipse.n4js.ts.typeRefs.ParameterizedTypeRef
 import org.eclipse.n4js.ts.types.TClass
 import org.eclipse.n4js.ts.types.TInterface
@@ -66,7 +66,7 @@ class N4JSExternalValidator extends AbstractN4JSDeclarativeValidator {
 	]
 
 	@Inject
-	private IN4JSCore n4jsCore;
+	private IN4JSCoreNEW n4jsCore;
 
 	@Inject
 	private JavaScriptVariantHelper jsVariantHelper;
@@ -305,7 +305,7 @@ class N4JSExternalValidator extends AbstractN4JSDeclarativeValidator {
 	 * Constraints 70. 1
 	 */
 	def private holdsDefinedInRuntime(ExportableElement element) {
-		val projectType = n4jsCore.findProject(element?.eResource?.URI).orNull?.projectType;
+		val projectType = n4jsCore.findProject(element?.eResource).orNull?.type;
 		if (projectType === null || projectType === ProjectType.RUNTIME_ENVIRONMENT ||
 			projectType === ProjectType.RUNTIME_LIBRARY) {
 			return true;

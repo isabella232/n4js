@@ -21,19 +21,22 @@ import java.util.Set;
 
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.n4js.N4JSGlobals;
-import org.eclipse.n4js.internal.N4JSProject;
+import org.eclipse.n4js.projectDescription.ProjectDependency;
+import org.eclipse.n4js.projectDescription.ProjectDescription;
 import org.eclipse.n4js.projectDescription.ProjectType;
+import org.eclipse.n4js.projectDescription.SourceContainerDescription;
+import org.eclipse.n4js.projectDescription.SourceContainerType;
 import org.eclipse.n4js.projectModel.IN4JSProject;
-import org.eclipse.n4js.projectModel.IN4JSSourceContainer;
-import org.eclipse.n4js.projectModel.locations.SafeURI;
+import org.eclipse.n4js.projectModel.locations.FileURI;
 import org.eclipse.n4js.projectModel.lsp.IN4JSSourceFolder;
+import org.eclipse.n4js.utils.ProjectDescriptionLoader;
+import org.eclipse.n4js.utils.ProjectDescriptionUtils;
 import org.eclipse.n4js.xtext.workspace.ConfigSnapshotFactory;
 import org.eclipse.n4js.xtext.workspace.ProjectConfigSnapshot;
 import org.eclipse.n4js.xtext.workspace.SourceFolderSnapshot;
 import org.eclipse.n4js.xtext.workspace.WorkspaceChanges;
 import org.eclipse.n4js.xtext.workspace.WorkspaceConfigSnapshot;
 import org.eclipse.n4js.xtext.workspace.XIProjectConfig;
-import org.eclipse.xtext.resource.impl.ProjectDescription;
 import org.eclipse.xtext.util.IFileSystemScanner;
 import org.eclipse.xtext.workspace.IProjectConfig;
 import org.eclipse.xtext.workspace.IWorkspaceConfig;
@@ -48,37 +51,82 @@ import com.google.common.collect.Iterables;
 public class N4JSProjectConfig implements XIProjectConfig {
 
 	private final IWorkspaceConfig workspace;
-	private final IN4JSProject delegate;
+	private final FileURI path;
+	// the following are not immutable, because an existing project might have its properties changed:
+	private ProjectDescription pd;
+	private Set<? extends IN4JSSourceFolder> sourceFolders;
+
+	private final ProjectDescriptionLoader projectDescriptionLoader;
 
 	/**
 	 * Constructor
 	 */
-	public N4JSProjectConfig(IWorkspaceConfig workspace, IN4JSProject delegate) {
-		this.workspace = workspace;
-		this.delegate = delegate;
+	public N4JSProjectConfig(IWorkspaceConfig workspace, FileURI path, ProjectDescription pd,
+			ProjectDescriptionLoader projectDescriptionLoader) {
+		this.workspace = Objects.requireNonNull(workspace);
+		this.path = Objects.requireNonNull(path);
+		this.pd = Objects.requireNonNull(pd);
+		this.sourceFolders = createSourceFolders(pd);
+		this.projectDescriptionLoader = projectDescriptionLoader;
+	}
+
+	protected void readProjectStateFromDisk() {
+		pd = projectDescriptionLoader.loadProjectDescriptionAtLocation(path);
+		if (pd == null) {
+			pd = ProjectDescription.builder().build();
+		}
+		sourceFolders = createSourceFolders(pd);
+	}
+
+	protected Set<? extends IN4JSSourceFolder> createSourceFolders(ProjectDescription pd) {
+		Set<IN4JSSourceFolder> result = new LinkedHashSet<>();
+		for (SourceContainerDescription scd : pd.getSourceContainers()) {
+			SourceContainerType type = scd.getSourceContainerType();
+			for (String relPath : ProjectDescriptionUtils.getPathsNormalized(scd)) {
+				result.add(new N4JSSourceFolder(this, type, relPath));
+			}
+		}
+		result.add(new SourceContainerForPackageJson());
+		return result;
+	}
+
+	@Override
+	public IWorkspaceConfig getWorkspaceConfig() {
+		return workspace;
 	}
 
 	@Override
 	public String getName() {
-		return delegate.getProjectName().getRawName();
-	}
-
-	/** @return the wrapped n4js project. */
-	public IN4JSProject toProject() {
-		return delegate;
+		return pd.getProjectName();
 	}
 
 	@Override
 	public URI getPath() {
-		return delegate.getLocation().withTrailingPathDelimiter().toURI();
+		return path.withTrailingPathDelimiter().toURI();
+	}
+
+	public FileURI getPathAsFileURI() {
+		return path;
+	}
+
+	public ProjectDescription getProjectDescription() {
+		return pd;
+	}
+
+	public boolean isWorkspacesProject() {
+		return pd.isYarnWorkspaceRoot() && pd.getWorkspaces() != null && !pd.getWorkspaces().isEmpty();
 	}
 
 	@Override
 	public Set<String> getDependencies() {
 		// note: it is important to return a list that contains names of unresolved (i.e. non-existing) projects, to
 		// avoid the need to recompute the list of dependencies of all existing projects whenever a project is added!
-		List<String> deps = ((N4JSProject) delegate).getDependenciesUnresolved();
-		return new LinkedHashSet<>(deps);
+		List<ProjectDependency> deps = pd.getProjectDependencies();
+		Set<String> result = new LinkedHashSet<>(deps.size());
+		for (ProjectDependency dep : deps) {
+			result.add(dep.getProjectName());
+		}
+		return result;
 	}
 
 	/** Special implementation for package.json files */
@@ -86,12 +134,22 @@ public class N4JSProjectConfig implements XIProjectConfig {
 		final URI pckjsonURI;
 
 		SourceContainerForPackageJson() {
-			pckjsonURI = delegate.getLocation().appendSegment(N4JSGlobals.PACKAGE_JSON).toURI();
+			pckjsonURI = path.appendSegment(N4JSGlobals.PACKAGE_JSON).toURI();
 		}
 
 		@Override
 		public String getName() {
 			return N4JSGlobals.PACKAGE_JSON;
+		}
+
+		@Override
+		public SourceContainerType getType() {
+			return SourceContainerType.SOURCE;
+		}
+
+		@Override
+		public String getRelativePath() {
+			return ".";
 		}
 
 		@Override
@@ -111,40 +169,23 @@ public class N4JSProjectConfig implements XIProjectConfig {
 
 		@Override
 		public URI getPath() {
-			return delegate.getLocation().toURI();
+			return path.toURI();
 		}
 	}
 
 	@Override
 	public Set<? extends IN4JSSourceFolder> getSourceFolders() {
-		Set<IN4JSSourceFolder> sourceFolders = new LinkedHashSet<>();
-		delegate.getSourceContainers().forEach(container -> sourceFolders.add(new N4JSSourceFolder(this, container)));
-		sourceFolders.add(new SourceContainerForPackageJson());
 		return sourceFolders;
 	}
 
 	@Override
-	public IN4JSSourceFolder findSourceFolderContaining(URI member) {
-		IN4JSSourceContainer sourceContainer = delegate.findSourceContainerWith(member);
-		if (sourceContainer == null) {
-			SourceContainerForPackageJson pckJsonSrcContainer = new SourceContainerForPackageJson();
-			if (pckJsonSrcContainer.contains(member)) {
-				return pckJsonSrcContainer;
+	public IN4JSSourceFolder findSourceFolderContaining(URI nestedURI) {
+		for (IN4JSSourceFolder candidate : getSourceFolders()) { // includes the package.json source folder
+			if (candidate.contains(nestedURI)) {
+				return candidate;
 			}
-			return null;
 		}
-		return new N4JSSourceFolder(this, sourceContainer);
-	}
-
-	/** @return the output folders of this project */
-	public List<URI> getOutputFolders() {
-		return Collections.singletonList(
-				delegate.getLocation().appendPath(delegate.getOutputPath()).withTrailingPathDelimiter().toURI());
-	}
-
-	@Override
-	public IWorkspaceConfig getWorkspaceConfig() {
-		return workspace;
+		return null;
 	}
 
 	/**
@@ -175,13 +216,20 @@ public class N4JSProjectConfig implements XIProjectConfig {
 
 	@Override
 	public boolean isGeneratorEnabled() {
-		ProjectType projectType = delegate.getProjectType();
+		ProjectType projectType = pd.getProjectType();
 		return !N4JSGlobals.PROJECT_TYPES_WITHOUT_GENERATION.contains(projectType);
 	}
 
+	public FileURI getProjectDescriptionURI() {
+		return getPathAsFileURI().appendSegment(N4JSGlobals.PACKAGE_JSON);
+	}
+
+	public boolean exists() {
+		return getProjectDescriptionURI().isFile();
+	}
+
 	/**
-	 * Updates this project configuration's internal state. In addition, the given {@link ProjectDescription} is also
-	 * updated accordingly.
+	 * Updates this project configuration's internal state.
 	 * <p>
 	 * This methods handles changes from
 	 * <ul>
@@ -196,14 +244,13 @@ public class N4JSProjectConfig implements XIProjectConfig {
 		ProjectConfigSnapshot oldProjectConfig = projectName != null ? oldWorkspaceConfig.findProjectByName(projectName)
 				: null;
 
-		SafeURI<?> pckjsonSafeUri = delegate.getProjectDescriptionLocation();
-		if (pckjsonSafeUri == null || !delegate.exists()) {
+		if (!exists()) {
 			// project was deleted
 			return oldProjectConfig != null ? WorkspaceChanges.createProjectRemoved(oldProjectConfig)
 					: WorkspaceChanges.NO_CHANGES;
 		}
 
-		URI pckjson = pckjsonSafeUri.toURI();
+		URI pckjson = getProjectDescriptionURI().toURI();
 		if (!pckjson.equals(changedResource)) {
 			// different file was saved/modified (not package.json)
 			return WorkspaceChanges.NO_CHANGES;
@@ -211,7 +258,7 @@ public class N4JSProjectConfig implements XIProjectConfig {
 
 		// package.json was modified
 
-		((N4JSProject) delegate).invalidate();
+		readProjectStateFromDisk();
 		ProjectConfigSnapshot newProjectConfig = configSnapshotFactory.createProjectConfigSnapshot(this);
 
 		if (oldProjectConfig == null) {
@@ -264,15 +311,4 @@ public class N4JSProjectConfig implements XIProjectConfig {
 				ImmutableList.copyOf(addedSourceFolders), ImmutableList.of(), ImmutableList.of(),
 				propertiesChanged ? ImmutableList.of(newProjectConfig) : ImmutableList.of());
 	}
-
-	/** @see N4JSProject#getWorkspaces() */
-	public List<String> getWorkspaces() {
-		return ((N4JSProject) delegate).getWorkspaces();
-	}
-
-	/** @see N4JSProject#isWorkspacesProject() */
-	public boolean isWorkspacesProject() {
-		return ((N4JSProject) delegate).isWorkspacesProject();
-	}
-
 }
